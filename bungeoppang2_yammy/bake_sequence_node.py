@@ -10,7 +10,8 @@
   5 10초 굽기
   6 돌림판:   경첩 봉 끝을 위에서 잡아 틀을 수평으로 90° 돌리기
     뒤집기:   겹친 손잡이를 끝에서 잡아 +30cm → 손목 180° → 내려놓기 → 10초
-  7 펼치기:   그 자리에서 위 손잡이만 다시 잡아 180° 펼치기 → 돌림판 원위치(−90°)
+  7 다시 뒤집기: 잡은 채 +30cm → 손목 −180°(되돌리기) → 내려놓기 (원래 면이 다시 위로)
+  8 펼치기:   그 자리에서 위 손잡이만 다시 잡아 165°까지 펼치기 → 돌림판 원위치(−90°)
 
   모든 이동 전: 안전 영역·작업반경 850mm·팔 접힘(경로 중간까지)·관절 범위(J3·J5 ±150°) 검사
   물체를 들 때: 그리퍼+물체 무게 ≤ 5kg 검사 / 시작할 때: 속도 설정이 사양 안인지 검사
@@ -19,7 +20,7 @@
 
 실행:
   단독 1회:      ros2 run bungeoppang2 bake_sequence [팥|슈크림 ...]
-  중간부터:      ros2 run bungeoppang2 bake_sequence 팥 --start=4      (단계 번호는 위 0~7)
+  중간부터:      ros2 run bungeoppang2 bake_sequence 팥 --start=4      (단계 번호는 위 0~8)
   실물:          ros2 run bungeoppang2 bake_sequence --real            (단계마다 Enter)
   주문 대기:     ros2 run bungeoppang2 bake_sequence --serve
 """
@@ -136,6 +137,20 @@ def main(args=None):
                              f"(목표 {[round(v) for v in pose[:3]]}, 실제 {[round(v) for v in got[:3]]}) "
                              "→ 로봇이 이 자세로 갈 수 없어요. positions.py에서 위치를 조정하세요")
 
+    def reachable_up(pose, z_min, margin=15.0):
+        """pose 높이를 목표로 하되, 팔이 너무 펴지면(어깨~손목 한계 - margin) 10mm씩 낮춤 (z_min 아래로는 안 감)"""
+        q = list(pose)
+        while q[2] > z_min:
+            try:
+                P.check_pose(q, "")
+                if P.arm_fold(q) <= P.WRIST_REACH_MAX - margin:
+                    return q
+            except ValueError:
+                pass
+            q[2] -= 10.0
+        q[2] = z_min
+        return q
+
     def go_rel_j6(deg, vel=None):
         j = list(get_current_posj())
         if abs(j[5] + deg) > P.J6_LIMIT:
@@ -251,8 +266,9 @@ def main(args=None):
         """그리퍼를 axis(0=x 좌우, 2=z 위아래)로 흔들기"""
         confirm(label)
         base = cur()
+        amps = (+P.NOD_UP, -P.NOD_DOWN) if axis == 2 else (+P.GESTURE_AMP, -P.GESTURE_AMP)
         for _ in range(P.GESTURE_REPEAT):
-            for d in (+P.GESTURE_AMP, -P.GESTURE_AMP):
+            for d in amps:
                 q = list(base); q[axis] += d
                 move_l(q, label, vel=P.VEL_L)
         move_l(base, "원위치")
@@ -334,7 +350,8 @@ def main(args=None):
             gripper.move(G.SAUCE_SQUEEZE_WIDTH, wait=0.2)  # ★ 짜는 양: grip_params.py
             move_l([fx, fy - ys, z_fl, *o], "짜면서 이동", vel=P.POUR_SPEED)
             gripper.move(G.SAUCE_GRIP_WIDTH, wait=0.2)
-            move_l([fx, fy - ys, high_z, *o], "들어올리기")
+            lift = reachable_up([fx, fy - ys, high_z, *o], z_fl + P.DISPENSE_HOP)   # 먼 칸은 끝까지 못 올라감
+            move_l(lift, f"들어올리기 (z {lift[2]:.0f})")
 
         confirm("입구를 다시 위로")
         go_rel_j6(-180.0)
@@ -448,12 +465,33 @@ def main(args=None):
         P.check_payload("mold", "틀 들기"); held_pub.publish(String(data="mold|" + ",".join(f"{v:.2f}" for v in cur())))
         move_l(P.turned_stack_pose(P.LIFT_HEIGHT), f"+{P.LIFT_HEIGHT/10:.0f}cm 들어올리기", vel=P.VEL_SLOW_L)
         confirm("공중에서 손목 180° 돌려 뒤집기 (손잡이 축)")
-        go_rel_j6(180.0)
+        flip_dir[mi] = go_rel_j6(180.0)               # 실제로 돈 방향 (되돌릴 때 반대로)
         down = cur(); down[2] -= P.LIFT_HEIGHT
         move_l(down, f"그대로 -{P.LIFT_HEIGHT/10:.0f}cm 내리기", vel=P.VEL_SLOW_L)
         confirm(f"잡은 채 {P.BAKE_SEC_SIDE2:.0f}초 대기")
         wait(P.BAKE_SEC_SIDE2)
         held_pub.publish(String(data="|" + ",".join(f"{v:.2f}" for v in cur())))
+
+    flip_dir = {}                                     # 틀별 첫 뒤집기 방향 (+180 / −180)
+
+    def flip_back(mi):
+        """한 번 더 뒤집어 원위치: 잡은 채 +30cm → 손목을 첫 뒤집기 반대로 180° → 내려놓기"""
+        here = P.tool_tip(cur())
+        stack = P.tool_tip(P.turned_stack_pose())
+        if math.dist(here, stack) >= 30.0:              # 중간 단계부터 시작: 겹친 손잡이로 다가가 잡기
+            confirm("다시 뒤집기: 겹친 손잡이를 끝에서 잡기")
+            _end_on_approach(P.turned_stack_pose(), "겹친 손잡이", G.STACK_OPEN_WIDTH)
+            gripper.move(G.STACK_GRIP_WIDTH, current=G.STACK_GRIP_CURRENT)
+            P.check_payload("mold", "틀 들기"); held_pub.publish(String(data="mold|" + ",".join(f"{v:.2f}" for v in cur())))
+        up = cur(); up[2] += P.LIFT_HEIGHT
+        move_l(up, f"+{P.LIFT_HEIGHT/10:.0f}cm 들어올리기 (다시 뒤집기)", vel=P.VEL_SLOW_L)
+        confirm("공중에서 손목 180° 되돌려 원위치로 뒤집기")
+        go_rel_j6(-flip_dir.get(mi, 180.0))             # 반대로 돌려 J6가 원래 각도로 (케이블 꼬임 방지)
+        down = cur(); down[2] -= P.LIFT_HEIGHT
+        move_l(down, f"그대로 -{P.LIFT_HEIGHT/10:.0f}cm 내리기", vel=P.VEL_SLOW_L)
+        if P.BAKE_SEC_SIDE3 > 0:
+            confirm(f"잡은 채 {P.BAKE_SEC_SIDE3:.0f}초 대기")
+            wait(P.BAKE_SEC_SIDE3)
 
     def open_lid(mi):
         """그 자리에서 위 손잡이만 다시 잡고 180° 펼치기 → 돌림판 원위치"""
@@ -486,8 +524,8 @@ def main(args=None):
     # ---------------- 전체 시퀀스 ----------------
     def run_all(fillings, start=0):
         """start = 시작할 단계 번호 (중간부터 다시 할 때)
-        0 홈 · 1 1차 반죽 · 2 속재료 · 3 2차 반죽 · 4 뚜껑 닫기 · 5 굽기 대기 · 6 돌림판+뒤집기 · 7 펼치기+원위치"""
-        STEPS = ["홈", "1차 반죽", "속재료", "2차 반죽", "뚜껑 닫기", "굽기 대기", "돌림판+뒤집기", "펼치기+원위치"]
+        0 홈 · 1 1차 반죽 · 2 속재료 · 3 2차 반죽 · 4 뚜껑 닫기 · 5 굽기 대기 · 6 돌림판+뒤집기 · 7 다시 뒤집기 · 8 펼치기+원위치"""
+        STEPS = ["홈", "1차 반죽", "속재료", "2차 반죽", "뚜껑 닫기", "굽기 대기", "돌림판+뒤집기", "다시 뒤집기", "펼치기+원위치"]
         n_molds = min(len(fillings) if fillings else 1, len(P.MOLD_GRIPS))
         molds = [(i, P.MOLD_GRIPS[i]) for i in range(max(n_molds, 1))]
         kinds = []
@@ -524,6 +562,9 @@ def main(args=None):
             for h in range(len(P.HANDLE_SHORTS)):
                 flip_stack(h)
         if do(7):
+            for h in range(len(P.HANDLE_SHORTS)):
+                flip_back(h)
+        if do(8):
             for h in range(len(P.HANDLE_SHORTS)):
                 open_lid(h)
         home()
