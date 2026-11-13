@@ -11,7 +11,8 @@
   6 돌림판:   경첩 봉 끝을 위에서 잡아 틀을 수평으로 90° 돌리기
     뒤집기:   겹친 손잡이를 끝에서 잡아 +30cm → 손목 180° → 내려놓기 → 10초
   7 다시 뒤집기: 잡은 채 +30cm → 손목 −180°(되돌리기) → 내려놓기 (원래 면이 다시 위로)
-  8 펼치기:   그 자리에서 위 손잡이만 다시 잡아 165°까지 펼치기 → 돌림판 원위치(−90°)
+  8 펼치기:   겹친 손잡이를 놓고 빠진 뒤, 위 손잡이만 '위에서' 잡아(손잡이 폭을 가로질러)
+              팔이 닿는 데까지(기본 105°) 펼치고 놓기 → 손잡이 끝 밖으로 빠지기 → 돌림판 원위치(−90°)
 
   모든 이동 전: 안전 영역·작업반경 850mm·팔 접힘(경로 중간까지)·관절 범위(J3·J5 ±150°) 검사
   물체를 들 때: 그리퍼+물체 무게 ≤ 5kg 검사 / 시작할 때: 속도 설정이 사양 안인지 검사
@@ -494,31 +495,56 @@ def main(args=None):
             wait(P.BAKE_SEC_SIDE3)
 
     def open_lid(mi):
-        """그 자리에서 위 손잡이만 다시 잡고 180° 펼치기 → 돌림판 원위치"""
+        """위 손잡이만 '위에서' 잡고 경첩 축으로 펼치기 → 놓아서 중력으로 눕힘 → 돌림판 원위치
+        겹친 손잡이는 위·아래가 틈 없이 붙어 있어서, 끝에서(손가락 위아래) 위 것만 잡으려면
+        아래 손가락이 아래 손잡이를 뚫어야 함 → 한 번 놓고 빠진 뒤 위에서 손잡이 폭을 잡음"""
+        def fl(pose=None):
+            return ",".join(f"{v:.2f}" for v in (pose or cur()))
+
         here = P.tool_tip(cur())
         stack = P.tool_tip(P.turned_stack_pose())
-        if math.dist(here, stack) < 30.0:               # 뒤집기 직후: 그 자리에서 다시 잡기
-            confirm("그 자리에서 그리퍼 벌렸다가 위 손잡이만 다시 잡기")
+        if math.dist(here, stack) < 30.0:               # 뒤집기 직후: 아직 겹친 손잡이를 끝에서 잡고 있음
+            confirm("겹친 손잡이 놓고 손잡이 끝 밖으로 빼기")
             gripper.move(G.STACK_OPEN_WIDTH, wait=0.3)
-            top = cur(); top[2] += P.STACK_T / 2
-            move_l(top, "위 손잡이 가운데로", vel=P.VEL_SLOW_L)
-        else:                                            # 중간 단계부터 시작: 위 손잡이로 다가가기
-            confirm("위 손잡이를 끝에서 잡기")
-            _end_on_approach(P.turned_stack_pose(z_extra=P.STACK_T / 2), "위 손잡이", G.HANDLE_OPEN_WIDTH)
-        gripper.move(G.HANDLE_GRIP_WIDTH, current=G.HANDLE_GRIP_CURRENT)
-        Rf = _R_now()
-        P.check_payload("lid", "틀 들기"); held_pub.publish(String(data="far|" + ",".join(f"{v:.2f}" for v in cur())))
-        end = min(180.0, P.OPEN_RELEASE_DEG)          # 180°는 도달 불가 → 여기까지 펼치고 놓으면 중력이 마저 눕힘
-        confirm(f"경첩을 축으로 {end:.0f}° 펼치기 (그 뒤는 놓아서 중력으로)")
-        n = max(1, int(round(end / P.LID_STEP_DEG)))
+            held_pub.publish(String(data="|" + fl()))
+            move_l(offset_tool(cur(), -P.END_GRIP_CLEAR), "손잡이 끝 밖으로 빼기", vel=P.VEL_SLOW_L)
+            go_up_safe("위로 빠지기")
+
+        # 어디까지 펼칠 수 있는지 미리 확인 (펼친 자세 + 놓은 뒤 손잡이 끝 밖으로 빠지는 자세까지)
+        grip = P.turned_top_grip(0.0)
+        path, prev = [], grip
+        n = max(1, int(round(P.OPEN_RELEASE_DEG / P.LID_STEP_DEG)))
         for k in range(1, n + 1):
-            t = end * k / n
-            move_l(P.pose_with(P.turned_open_tcp(t, P.STACK_T * (1 - t / 180.0)), P.turned_hinge_rot(t, Rf)),
-                   f"열기 {t:.0f}°", vel=P.VEL_SLOW_L)
-        gripper.move(G.HANDLE_OPEN_WIDTH, wait=0.3)
-        held_pub.publish(String(data="|" + ",".join(f"{v:.2f}" for v in cur())))
-        up1 = cur(); up1[2] += 60.0                       # 펼친 뒤엔 뒤로 빼지 않고 위로 (팔이 덜 펴짐)
-        move_l(up1, "펼친 손잡이에서 위로 빠지기", vel=P.VEL_SLOW_L)
+            t = P.OPEN_RELEASE_DEG * k / n
+            p = P.turned_top_grip(t)
+            out = P.turned_top_out(t, P.END_GRIP_CLEAR)
+            try:
+                P.check_pose(p, ""); P.check_path(prev, p, ""); joint_check(p, "")
+                P.check_pose(out, ""); P.check_path(p, out, ""); joint_check(out, "")
+            except ValueError as e:
+                log.warning(f"   펼치기 {t:.0f}°부터는 닿지 않음: {e}")
+                break
+            path.append((t, p, out)); prev = p
+        end = path[-1][0] if path else 0.0
+        if end < P.OPEN_RELEASE_MIN:
+            raise ValueError(f"[안전 정지] 펼치기: {end:.0f}°까지만 닿음 — 놓으면 뚜껑이 도로 닫힘 "
+                             f"(최소 {P.OPEN_RELEASE_MIN:.0f}°) → positions.py에서 틀 위치나 LID_GRIP_R을 조정하세요")
+
+        confirm("위 손잡이를 위에서 잡기 (손가락이 손잡이 폭을 가로질러 닫힘, 아래 손잡이에는 안 닿음)")
+        gripper.move(G.TOP_OPEN_WIDTH, wait=0.3)
+        move_jx(P.turned_top_grip(0.0, up=P.TOP_APPROACH), "위 손잡이 위")
+        move_l(grip, "위 손잡이 잡는 점", vel=P.VEL_SLOW_L)
+        gripper.move(G.TOP_GRIP_WIDTH, current=G.HANDLE_GRIP_CURRENT)
+        P.check_payload("lid", "틀 들기"); held_pub.publish(String(data="far|" + fl()))
+
+        confirm(f"경첩을 축으로 {end:.0f}° 펼치기 (그 뒤는 놓아서 중력으로)")
+        for t, p, _ in path:
+            move_l(p, f"열기 {t:.0f}°", vel=P.VEL_SLOW_L)
+        gripper.move(G.TOP_OPEN_WIDTH, wait=0.3)
+        held_pub.publish(String(data="|" + fl(P.turned_top_grip(180.0))))   # RViz: 놓으면 중력으로 180°까지 눕혀짐
+        # 놓으면 뚜껑이 그리퍼 쪽으로 넘어오므로, 손잡이 축을 따라 끝 밖으로 바로 빠짐 (뒤로 빼면 넘어오는 뚜껑과 부딪힘)
+        move_l(path[-1][2], "손잡이 끝 밖으로 빠지기")
+        go_up_safe("위로 빠지기")
         turn_table(P.turn_deg(), 0.0, "틀 원위치")
 
     # ---------------- 전체 시퀀스 ----------------
