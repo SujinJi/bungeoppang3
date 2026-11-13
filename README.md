@@ -113,6 +113,11 @@ ros2 run bungeoppang2 bake_sequence --serve           # 주문 대기 모드
 `[도달 실패]` 오류가 나면 로그에 나온 목표/실제 좌표를 보고 `positions.py`에서 해당 위치를 조정하세요.
 예: 펼치기 180°는 로봇이 도달할 수 없어서 `OPEN_RELEASE_DEG = 105.0`까지만 펼치고 놓습니다 (90°를 넘으면 중력으로 마저 눕혀짐). 실행 중에는 팔이 닿는 각도를 미리 확인해서 그보다 덜 펼 수 있고, `OPEN_RELEASE_MIN`(95°)보다 덜 닿으면 멈춥니다.
 
+## 에뮬레이터 실행 영상
+
+[Rviz2 시연 영상](https://youtu.be/tOi8jhYWsEc)
+
+
 ## 라이선스
 
 MIT
